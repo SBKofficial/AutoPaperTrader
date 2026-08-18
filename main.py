@@ -6,7 +6,6 @@ import pytz
 import warnings
 import numpy as np
 import pandas as pd
-import pandas_ta as ta
 import yfinance as yf
 from dotenv import load_dotenv
 
@@ -34,7 +33,7 @@ logger = logging.getLogger(__name__)
 # CONFIGURATION & CONSTANTS
 # ==============================================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")  # Optional: For automated broadcast alerts
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 
 STATE_FILE = "paper_portfolio_state.json"
 LOG_FILE = "paper_trade_log.csv"
@@ -53,6 +52,18 @@ UNIVERSE = [
 ]
 BENCHMARK = "^NSEI"
 IST = pytz.timezone('Asia/Kolkata')
+
+# ==============================================================================
+# TECHNICAL INDICATORS (PURE PANDAS - NO DEPENDENCY ISSUES)
+# ==============================================================================
+def calc_ema(series: pd.Series, length: int) -> pd.Series:
+    return series.ewm(span=length, adjust=False).mean()
+
+def calc_sma(series: pd.Series, length: int) -> pd.Series:
+    return series.rolling(window=length).mean()
+
+def calc_roc(series: pd.Series, length: int) -> pd.Series:
+    return series.pct_change(periods=length) * 100.0
 
 # ==============================================================================
 # STATE & LOGGING MANAGEMENT
@@ -204,9 +215,9 @@ def execute_engine_cycle():
 
     # 3. Evening Screener (Queue Buy Signals for Tomorrow's Open)
     nifty_close = close_df[BENCHMARK].dropna()
-    nifty_200_sma = ta.sma(nifty_close, length=200).iloc[-1]
-    nifty_roc_63 = ta.roc(nifty_close, length=63).iloc[-1]
-    macro_bullish = nifty_close.iloc[-1] > nifty_200_sma
+    nifty_200_sma = float(calc_sma(nifty_close, 200).iloc[-1])
+    nifty_roc_63 = float(calc_roc(nifty_close, 63).iloc[-1])
+    macro_bullish = float(nifty_close.iloc[-1]) > nifty_200_sma
     state["pending_signals"] = []
 
     if macro_bullish:
@@ -216,10 +227,10 @@ def execute_engine_cycle():
             df = pd.DataFrame({'Close': close_df[ticker]}).dropna()
             if len(df) < 200: continue
             
-            df['9_EMA'] = ta.ema(df['Close'], length=9)
-            df['21_EMA'] = ta.ema(df['Close'], length=21)
-            df['200_EMA'] = ta.ema(df['Close'], length=200)
-            df['ROC_63'] = ta.roc(df['Close'], length=63)
+            df['9_EMA'] = calc_ema(df['Close'], 9)
+            df['21_EMA'] = calc_ema(df['Close'], 21)
+            df['200_EMA'] = calc_ema(df['Close'], 200)
+            df['ROC_63'] = calc_roc(df['Close'], 63)
             
             df['9_above_21'] = df['9_EMA'] > df['21_EMA']
             prev_day = df['9_above_21'].shift(1).fillna(False).astype(bool)
@@ -292,7 +303,7 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     nifty_close = close_df[BENCHMARK].dropna()
     nifty_last = float(nifty_close.iloc[-1])
-    nifty_200_sma = float(ta.sma(nifty_close, length=200).iloc[-1])
+    nifty_200_sma = float(calc_sma(nifty_close, 200).iloc[-1])
     is_bullish = nifty_last > nifty_200_sma
     macro_icon = "🟢 BULLISH (> 200 SMA)" if is_bullish else "🔴 BEARISH (< 200 SMA)"
 
@@ -410,13 +421,11 @@ def main():
     job_queue = app.job_queue
     if job_queue:
         from datetime import time
-        # Morning Open Fill Job: 9:18 AM IST
         job_queue.run_daily(
             scheduled_daily_run,
             time=time(hour=9, minute=18, tzinfo=IST),
             days=(0, 1, 2, 3, 4)
         )
-        # Evening Exit & Screener Job: 3:35 PM IST
         job_queue.run_daily(
             scheduled_daily_run,
             time=time(hour=15, minute=35, tzinfo=IST),
